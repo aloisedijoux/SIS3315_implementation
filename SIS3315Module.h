@@ -8,6 +8,17 @@ public:
 void ReadoutLoop();
 void Connect() override {
     // code de connexion spécifique au SIS3315
+}
+std::vector<Event> readData();
+const std::vector<Event*> getEventPointers() {
+        std::vector<Event*> ptrs;
+        for (auto& e : eventBuffer_)
+            ptrs.push_back(&e);
+        return ptrs;
+    }
+private:
+std::unique_ptr<::SIS3315Module> hwModule_;   
+std::vector<Event> eventBuffer_; // stocké dans le module
 };
 
 #endif // SIS3315MODULE_H
