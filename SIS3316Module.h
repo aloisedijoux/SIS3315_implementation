@@ -1,56 +1,61 @@
 #ifndef SIS3316MODULE_H
 #define SIS3316MODULE_H
+
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
 #include "ADCModule.h"
-#include "drivers/sis3316_class.h"
 #include "ITransport.h"
-#include "/home/aloiselkb/sis3315_implementation/drivers/sis3316.h"
-// "overloaded" = même nom, signatures différentes
-// Le compilateur choisit lequel appeler selon les arguments
+#include "drivers/sis3316.h"
+#include "drivers/sis3316_class.h"
 
-class SIS3316Module : public ADCModule {
+class SIS3316Module : public ADCModule, public sis3316_adc {
 public:
-    // Surcharge 1 — Ethernet implicite
-    explicit SIS3316Module(const std::string& ip);
+    SIS3316Module(vme_interface_class* crate, unsigned int baseAddress);
 
-    // Surcharge 2 — transport injecté explicitement
-    explicit SIS3316Module(const std::string& ip,
-                            std::shared_ptr<ITransport> transport);
+    // ADCModule overrides
+    bool  SetParameter(ADCParameterType param, float value, int channel = -1) override;
+    float GetParameter(ADCParameterType param, int channel = -1) const override;
+    bool  SaveToDisk(const std::string& filepath) const override;
+    bool  LoadFromDisk(const std::string& filepath) override;
+    bool  Connect() override;
+    void  Disconnect() override;
+    bool  IsConnected() const override;
+    int   SoftwareTrigger() override;
+    void  StartAcquisition() override;
+    void  StartReadoutLoop() override;
+    void  StopReadoutLoop() override;
+    void  ParseEvent(Event e) override;
+    void  DispatchEvent(const Event& e) const override;
 
-    // Surcharge 3 — slot VME
-    explicit SIS3316Module(uint32_t baseAddress, int crateHandle);
+    std::vector<Event>  ReadData();
+    std::vector<Event*> GetEventPointers();
+    void                ReadoutLoop();
 
-    void ADCModule::Connect() override {
-        // code de connexion spécifique au SIS3316
-    };
+    // lit les registres pour adapter le comportement au hardware présent
+    void DetectHardwareVersion();
+    void DetectFirmwareVersion();
 
-    std::vector<Event> readData();
-    const std::vector<Event*> getEventPointers() {
-        std::vector<Event*> ptrs;
-        for (auto& e : eventBuffer_)
-            ptrs.push_back(&e);
-        return ptrs;
-    }
-
-    void DetectHardwareVersion(); // lit un registre pour différencier 14 bit vs 16 bit
-    void DetectFirmwareVersion(); // lit un registre pour adapter les limites de certains paramètres
-
-// Setter dédié pour choisir le connecteur externe
-void SetExternalClockConnector(uint32_t sel) {
-    // sel = 1 (VXS), 2 (LVDS), 3 (NIM)
-    if (sel >= 1 && sel <= 3)
-        externalClockSel_ = sel;
-}
+    // sel : 1 = VXS, 2 = LVDS, 3 = NIM
+    void SetExternalClockConnector(uint32_t sel);
 
 private:
-std::unique_ptr<::SIS3316Module> hwModule_;
-std::vector<Event> eventBuffer_; // stocké dans le module
-uint32_t maxPreTrigger_ = 16378; // valeur par défaut firmware récent
+    void InitSupportedValues();
+    bool IsValueSupported(ADCParameterType param, float value) const;
 
-// Membre privé pour mémoriser le connecteur externe préféré
-uint32_t externalClockSel_ = 0b10; // LVDS par défaut
-
+    std::vector<Event>  eventBuffer_;
+    std::atomic<bool>   running_{false};
+    mutable std::mutex  paramMutex_;
+    std::thread         readoutThread_;
+    bool                connected_{false};
+    bool                is16bit_{true};
+    bool                firmwareSupportsAveraging_{false};
+    uint32_t            externalClockSel_{0b10}; // LVDS par défaut
+    uint32_t            maxPreTrigger_{16378};
 };
-
-
 
 #endif // SIS3316MODULE_H
