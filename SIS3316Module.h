@@ -3,6 +3,7 @@
 #include "ADCModule.h"
 #include "drivers/sis3316_class.h"
 #include "ITransport.h"
+#include "/home/aloiselkb/sis3315_implementation/drivers/sis3316.h"
 // "overloaded" = même nom, signatures différentes
 // Le compilateur choisit lequel appeler selon les arguments
 
@@ -30,10 +31,23 @@ public:
         return ptrs;
     }
 
-    
+    void DetectHardwareVersion(); // lit un registre pour différencier 14 bit vs 16 bit
+    void DetectFirmwareVersion(); // lit un registre pour adapter les limites de certains paramètres
+
+// Setter dédié pour choisir le connecteur externe
+void SetExternalClockConnector(uint32_t sel) {
+    // sel = 1 (VXS), 2 (LVDS), 3 (NIM)
+    if (sel >= 1 && sel <= 3)
+        externalClockSel_ = sel;
+}
+
 private:
 std::unique_ptr<::SIS3316Module> hwModule_;
 std::vector<Event> eventBuffer_; // stocké dans le module
+uint32_t maxPreTrigger_ = 16378; // valeur par défaut firmware récent
+
+// Membre privé pour mémoriser le connecteur externe préféré
+uint32_t externalClockSel_ = 0b10; // LVDS par défaut
 
 };
 
