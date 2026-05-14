@@ -35,3 +35,56 @@ void SIS3315Module::ReadoutLoop() {
 void SIS3315Module::DispatchEvent(const Event& e) const {
     if (cb_) cb_(e); // appel direct, zéro copie
 }
+
+
+// "splits data into events" = parse le buffer brut du hardware
+// en objets Event individuels, un par trigger
+std::vector<Event> SIS3315Module::readData() {
+    std::vector<Event> results;
+    while (hwModule_->HasData()) {
+        auto raw = hwModule_->ReadNextEvent();
+        results.push_back(parse(raw)); // conversion SDK → ADC::Event
+    }
+    return results;
+}
+
+Event reusable;
+while (running_) {
+    if (hw_->HasData()) {
+        reusable = parse(hw_->ReadNext());
+        if (cb_) cb_(reusable);
+    }
+}
+
+
+
+void SIS3315Module::InitSupportedValues() {
+    // Valeurs différentes — datasheet SIS3315
+    supportedParameterValues_[ADCParameterType::SamplingRate]
+        = {100.0f, 200.0f};          // différent du SIS3316
+    supportedParameterValues_[ADCParameterType::VoltageRange]
+        = {1.0f, 2.0f, 5.0f};       // différent du SIS3316
+    supportedParameterValues_[ADCParameterType::AveragingMode]
+        = {0, 4, 16, 64};           // différent du SIS3316
+}
+
+
+bool SIS3315Module::SetParameter(ADCParameterType param,
+                                  float value,
+                                  int channel) {
+    if (!IsValueSupported(param, value)) return false;
+    std::lock_guard<std::mutex> lock(paramMutex_);
+
+    switch (param) {
+        case ADCParameterType::SamplingRate:
+            hwModule_->SetSamplingRate(  // nom différent dans SDK SIS3315
+                static_cast<int>(value));
+            break;
+        case ADCParameterType::VoltageRange:
+            hwModule_->SetVoltageRange(channel, value); // nom différent
+            break;
+        default:
+            return false;
+    }
+    return true;
+}
