@@ -27,4 +27,32 @@ m.StartAcquisition();
 // Avantage clé : l'objet existe sans hardware
 // - testable sans module physique présent
 // - reconnectable sans recréer l'objet
+
+
+module->SetEventCallback([](const Event& e) { process(e); });
+module->SetEventCallback([this](const Event& e) { this->OnEvent(e); });
+
+std::vector<std::shared_ptr<ADC::ADCModule>> modules;
+modules.push_back(
+    std::make_shared<SIS3316Module>("192.168.1.10"));
+modules.push_back(
+    std::make_shared<SIS3316Module>("192.168.1.11"));
+modules.push_back(
+    std::make_shared<SIS3315Module>("192.168.1.12"));
+
+    for (auto& m : modules) m->Connect();
+for (auto& m : modules) m->StartAcquisition();
+
+bool MidasADCFrontend::Init() {
+    for (auto& m : modules_)
+        if (!m->Connect()) return false; // Connect sur tous
+    return true;
+}
+
+bool MidasADCFrontend::Begin(int runNumber) {
+    SyncAllClocks();
+    for (auto& m : modules_)
+        if (!m->StartAcquisition()) return false; //  Start sur tous
+    return true;
+}
 }
