@@ -5,7 +5,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
-
+#include "/home/aloiselkb/sis3315_implementation/sis3315-software/libraries_and_includes/sis3315_header/sis3315.h"
 void SIS3315Module::SetParameter(const std::string& name, int value)
 {
     if (name == "threshold")
