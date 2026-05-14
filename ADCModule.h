@@ -9,8 +9,9 @@
 
 #include "EventClass.h"
 
-using Callback = std::function<void(const Event&)>;
+using Callback = std::function<void(const Event&)>; // crée un alias pour un type, en l'occurrencestd::function<void(const Event&)> c'est un type qui peut stocker n'importe quelle fonction qui prend un Event et ne retourne rien
 
+// à chaque paramètre ADC (clé), on associe la liste des valeurs autorisées (valeur). Chaque classe dérivée remplit cette map à partir de la datasheet du constructeur.
 enum class ADCParameterType {
     SamplingRate,
     VoltageRange,
@@ -28,7 +29,7 @@ enum class ADCParameterType {
 class ADCModule {
 protected:
     std::map<ADCParameterType, std::vector<float>> supportedParameterValues_;
-    Callback cb_;
+    Callback cb_; 
 
 public:
     virtual ~ADCModule() = default;
