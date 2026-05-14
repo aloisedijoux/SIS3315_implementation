@@ -29,9 +29,12 @@ public:
             ptrs.push_back(&e);
         return ptrs;
     }
+
+    
 private:
 std::unique_ptr<::SIS3316Module> hwModule_;
 std::vector<Event> eventBuffer_; // stocké dans le module
+
 };
 
 
