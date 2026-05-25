@@ -1,6 +1,52 @@
 #include "ADCModule.h"
 #include "sis3315-software/libraries_and_includes/sis3315_class_library/sis3315_class.h"
 #include <functional>
+struct NimClockParams {
+    unsigned int bw_sel;    // bandwidth select (0–15, voir DSPLLsim)
+    unsigned int n1_hs;     // high-speed divider (4–11)
+    unsigned int n1_clk1;   // output divider CKOUT1 (1,2,4,6,..220)
+    unsigned int n1_clk2;   // output divider CKOUT2 (1,2,4,6,..220)
+    unsigned int n2;        // feedback divider (32–512, pair)
+    unsigned int n3;        // input divider (1–219)
+    unsigned int clkin_mhz; // fréquence d'entrée sur NIM CI (MHz)
+};
+
+enum ClockSource {
+    CLOCK_SRC_INTERNAL = 0,
+    CLOCK_SRC_FPBUS = 2,
+    CLOCK_SRC_NIM = 3
+};
+
+enum FpBusRole {
+    FP_BUS_MASTER,  // génère et envoie l'horloge sur le FP-Bus
+    FP_BUS_SLAVE    // reçoit l'horloge depuis le FP-Bus
+};
+
+struct SIS3315Config {
+    double      frequency_msps;
+    double      bit_clock_mhz;
+    double      actual_frequency_msps;
+    double      actual_precision_ns;
+    ClockSource clock_source;
+    FpBusRole   fp_bus_role;   // pertinent uniquement si CLOCK_SRC_FP_BUS
+};
+
+
+enum NimMode {
+    NIM_BYPASS,    // SI5325 en bypass — horloge NIM transmise telle quelle
+    NIM_MULTIPLY   // SI5325 en mode PLL — multiplie la fréquence d'entrée
+};
+
+struct SIS3315ClockConfig {
+    double      frequency_msps;
+    double      bit_clock_mhz;
+    double      actual_frequency_msps;
+    double      actual_precision_ns;
+    ClockSource clock_source;
+    FpBusRole   fp_bus_role;
+    NimMode     nim_mode;
+};
+
 // pour chaque parametre ADCParameterType, on crée une struct const uint32 contenant les registres quicorrespondent à l'enum 
 
 static const uint32_t kAveragingModeAddrs[] = {
@@ -15,7 +61,7 @@ SIS3315_ADC_CH13_16_AVERAGE_CONFIGURATION_REG,					 // only SIS3316-16bit
 static const uint32_t kClockSourceAddrs[] = {
     SIS3315_SAMPLE_CLOCK_DISTRIBUTION_CONTROL,    	    			      /* read/write; D32 */
 SIS3315_ADC_CLK_OSC_I2C_REG,	// TODO: voir ce qu'on peut déjà faire avec les fonctions qui implémentent ce registre, fournies par struck, càd set_frequency,set_ADC_bit_clock_frequency,change_frequency_HSdiv_N1div et get_frequency			     	    			      /* read/write; D32 */
-
+//done: Très important — set_frequency() fait déjà le DCM Reset (0x438) et l'attente 5ms en interne. Et set_ADC_bit_clock_frequency() appelle set_frequency() en interne. Donc dans notre fonction, les étapes 4 et 5 sont déjà faites implicitement.
 };
 
 static const uint32_t kIputTerminationAddrs[] = {
@@ -123,10 +169,9 @@ static const std::unordered_map<ADCParameterType, RegisterDescriptor> kParamRegi
         {
             .adresses = kClockSourceAddrs,
             .addrCount = 1, // tout est appliqué à tous les canaux d'un coup 
-            .mask = 0x40, //TODO : verify the value
+            .mask = 0x00000003,
             .shift = 0,
-            // .encode = 
-            // TODO : encode
+            .encode = [](uint32_t value) { return (value << 0) & 0x00000003; },
         }
     },
     {
@@ -145,10 +190,11 @@ static const std::unordered_map<ADCParameterType, RegisterDescriptor> kParamRegi
         {
             .adresses = kPretriggerAddrs,
             .addrCount = 4,
-            .mask = 0x00003FFF, // bits de 0 à 13.
+            .mask = 0x00003FFF, // bits de 0 à 13.  
             .shift = 0,
-            // .encode =
-             // TODO : encode
+            .encode = [](uint32_t value) -> uint32_t {return value & 0x3FFE;} // arrondi multiple de 2
+            
+
         }
     },
     {
@@ -231,6 +277,11 @@ ADC-inputs.
     },
     
 };
+
+template<typename T> bool inRange(T value, T min, T max) {
+    return value >= min && value <= max;
+}
+
 // construceur de ADCModule de la forme : ADCModule()
 // constructeur de sis3315_adc de la forme : sis3315_adc(vme_interface_class* crate, unsigned int baseaddress)
 class SIS3315Module : public ADCModule, public sis3315_adc {
@@ -242,9 +293,11 @@ public:
     void SetParameter(ADCParameterType param, float value, int channelGroup = 0);
     bool isValueSupported(ADCParameterType param, float value);
     float GetValue();
-    
-    
+    bool find_hs_n1(double frequency_mhz, unsigned int& hs_div, unsigned int& n1_div, sis3315_adc *adc);
+    // overrides
+    int resetModule() override;
+    SIS3315ClockConfig ClockConfiguration(SIS::ADC::SIS3315::SampleRate sample_rate, ClockSource clock_source, FpBusRole fp_bus_role, NimMode nim_mode,const NimClockParams* nim_params);
+    void InitSupportedValues() override;    
 
     
 };  
-
