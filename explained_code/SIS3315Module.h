@@ -47,6 +47,11 @@ struct SIS3315ClockConfig {
     NimMode     nim_mode;
 };
 
+enum InputTermination {
+    TERMINATION_HIZ  = 0,   // Hi-Z (défaut si jumper absent)
+    TERMINATION_50OHM = 1   // 50ohm
+};
+
 // pour chaque parametre ADCParameterType, on crée une struct const uint32 contenant les registres quicorrespondent à l'enum 
 
 static const uint32_t kAveragingModeAddrs[] = {
@@ -278,9 +283,29 @@ ADC-inputs.
     
 };
 
+/*
+
+L'utilisateur fixe nof_samples dans le registre de configuration du canal (registre 0x1004 pour Ch1-4, etc.). C'est lui qui détermine combien de samples sont enregistrés par déclenchement.
+La taille du buffer doit donc être au moins :
+buffer_size = nof_samples × (18 bits arrondis à 32 bits) = nof_samples mots 32-bit
+*/
+using DataCallback = std::function<void(unsigned int bank, unsigned int channel, unsigned int* data, unsigned int nbofwords)>;
+
 template<typename T> bool inRange(T value, T min, T max) {
     return value >= min && value <= max;
 }
+enum class AcquisitionMode {
+    INTERFACE,  // bank swap déclenché par software (address threshold)
+    NIM         // bank swap déclenché par signal NIM TI/UI
+};
+
+struct AcquisitionConfig {
+    std::vector<unsigned int> channels;    // liste des canaux à lire (0–15)
+    unsigned int address_threshold;        // seuil de remplissage mémoire
+                                           // (même valeur pour tous les groupes)
+    unsigned int poll_timeout_us;          // timeout du poll address threshold (µs)
+    unsigned int max_events;               // 0 = infini
+};
 
 // construceur de ADCModule de la forme : ADCModule()
 // constructeur de sis3315_adc de la forme : sis3315_adc(vme_interface_class* crate, unsigned int baseaddress)
@@ -294,6 +319,15 @@ public:
     bool isValueSupported(ADCParameterType param, float value);
     float GetValue();
     bool find_hs_n1(double frequency_mhz, unsigned int& hs_div, unsigned int& n1_div, sis3315_adc *adc);
+   InputTermination ReadInputTermination();
+   int Disarm();
+   void ControlFlow(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag);
+   bool Poll(unsigned int timeout);
+   bool checkBankSwap();
+   void read_bank_channels(unsigned int bank2_flag,
+                                      const std::vector<unsigned int>& channels,
+                                      unsigned int* buffer,
+                                      DataCallback cb);
     // overrides
     int resetModule() override;
     SIS3315ClockConfig ClockConfiguration(SIS::ADC::SIS3315::SampleRate sample_rate, ClockSource clock_source, FpBusRole fp_bus_role, NimMode nim_mode,const NimClockParams* nim_params);
