@@ -486,6 +486,46 @@ void SIS3315Module::ControlFlow(const AcquisitionConfig& config, DataCallback us
     else
         ControlFlowCycles(config, user_callback, run_flag);
 }
+InputRange SIS3315Module::ReadInputRange()
+{
+    unsigned int hw_version = 0;
+    int rc = register_read(SIS3315_HARDWARE_VERSION, &hw_version);
+    if (rc) throw std::runtime_error(
+        "Lecture Hardware Version échouée (rc=" + std::to_string(rc) + ").");
+
+    unsigned int bits2_0 = hw_version & 0x7; //section 5.7 datasheet
+
+    switch (bits2_0) {
+    case 1:
+        std::cout << "[SIS3315] Plage d'entrée : ±2.5V (5V total)\n";
+        return RANGE_PM25V;
+    default:
+        std::cout << "[SIS3315] Plage d'entrée : inconnue (bits 2:0 = "
+                  << bits2_0 << ")\n";
+        return UNKNOWN_RANGE;
+    }
+}
+// offsets methods 
+
+void SIS3315Module::ConfigureSignal(unsigned int offset_all_channels = 0x8000)
+{
+    // 1. Info hardware — lecture seule, pour que le physicien sache
+    //    quel câble utiliser et si son signal rentre dans la plage
+    ReadInputTermination();
+    ReadInputRange();
+
+    // 2. Offset DAC — même valeur sur tous les canaux
+    //    0x8000 = centré sur 0V (défaut recommandé)
+    //    Le physicien peut modifier canal par canal après cet appel :
+    //    module.adc_dac_offset_ch_array[0] = 0x6667;
+    for (unsigned int ch = 0; ch < 16; ch++)
+        this->adc_dac_offset_ch_array[ch] = offset_all_channels;
+
+    // 3. Envoyer les offsets au hardware
+    int rc = write_all_adc_dac_offsets();
+    if (rc) throw std::runtime_error(
+        "write_all_adc_dac_offsets() échoué (rc=" + std::to_string(rc) + ").");
+}
 
 /*
 Fonctionnement de l'horgloge : 

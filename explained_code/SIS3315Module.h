@@ -287,6 +287,10 @@ enum class AcquisitionMode {
     NIM         // bank swap déclenché par signal NIM TI/UI
 };
 
+enum InputRange {
+    RANGE_PM25V,
+    UNKNOWN_RANGE
+};
 /*
 
 L'utilisateur fixe nof_samples dans le registre de configuration du canal (registre 0x1004 pour Ch1-4, etc.). C'est lui qui détermine combien de samples sont enregistrés par déclenchement.
@@ -339,6 +343,10 @@ public:
                                       unsigned int* buffer,
                                       DataCallback cb);
     unsigned int max_events_from_duration(double duration_seconds, double trigger_rate_hz);
+
+    // offset dac methods
+void ConfigureSignal(unsigned int offset_all_channels = 0x8000);
+InputRange ReadInputRange();
     // overrides
     int resetModule() override;
     SIS3315ClockConfig ClockConfiguration(SIS::ADC::SIS3315::SampleRate sample_rate, ClockSource clock_source, FpBusRole fp_bus_role, NimMode nim_mode,const NimClockParams* nim_params);
