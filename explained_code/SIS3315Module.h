@@ -321,13 +321,16 @@ public:
     bool find_hs_n1(double frequency_mhz, unsigned int& hs_div, unsigned int& n1_div, sis3315_adc *adc);
    InputTermination ReadInputTermination();
    int Disarm();
-   void ControlFlow(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag);
+   void ControlFlowCycles(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag);
+      void ControlFlowNIM(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag);
+
    bool Poll(unsigned int timeout);
    bool checkBankSwap();
    void read_bank_channels(unsigned int bank2_flag,
                                       const std::vector<unsigned int>& channels,
                                       unsigned int* buffer,
                                       DataCallback cb);
+    unsigned int max_events_from_duration(double duration_seconds, double trigger_rate_hz);
     // overrides
     int resetModule() override;
     SIS3315ClockConfig ClockConfiguration(SIS::ADC::SIS3315::SampleRate sample_rate, ClockSource clock_source, FpBusRole fp_bus_role, NimMode nim_mode,const NimClockParams* nim_params);

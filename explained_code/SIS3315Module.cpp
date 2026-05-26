@@ -29,6 +29,9 @@ static constexpr double IOB_DELAY_VALUE              = 0x14; // recommandé data
 #define ACQ_BIT_SAMPLE_LOGIC_ARMED  16  // ADC Sample Logic Armed
 #define ACQ_BIT_ARMED_ON_BANK2      17  // ADC Sample Logic Armed on Bank2
 
+#define ACQ_BIT_SAMPLE_LOGIC_ARMED  16  // 1 = sample logic armée
+#define ACQ_BIT_ARMED_ON_BANK2      17  // 1 = armée sur Bank2, 0 = Bank1
+#define ACQ_BIT_NIM_SWAP_ENABLED    22  // 1 = NIM bank swap logic active
 
 #include <iostream>
 // VCO things from SI570 datasheet
@@ -113,6 +116,8 @@ int SIS3315Module::resetModule() {
     if (rc) throw std::runtime_error("Key Reset échoué (rc=" + std::to_string(rc) + ").");
 }
 
+unsigned int SIS3315Module::max_events_from_duration(double duration_seconds, double trigger_rate_hz) {} //TODO 
+
 // input termination : SIS3315_HARDWARE_VERSION. bit 4 but only for reading
 
 InputTermination SIS3315Module::ReadInputTermination()
@@ -173,6 +178,7 @@ bool SIS3315Module::checkBankSwap() {
 
 void SIS3315Module::read_bank_channels(unsigned int bank2_flag, const std::vector<unsigned int>& channels, unsigned int* buffer, DataCallback cb) {
     // vérifier que le channel est valide
+
     for (unsigned int ch : channels) {
         if (ch > 15)
             throw std::invalid_argument("Numéro de canal invalide: " + std::to_string(ch) + ". Doit être entre 0 et 15.");
@@ -194,34 +200,163 @@ void SIS3315Module::read_bank_channels(unsigned int bank2_flag, const std::vecto
             cb(bank2_flag+1, ch, buffer, nbofwords); // on retourne à l'utilisateur le numéro de bank, le numéro de canal, le buffer et le nombre de mots lus pour qu'il puisse faire ce qu'il veut avec les données
     }
 }
-void SIS3315Module::ControlFlow(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag) {
+void SIS3315Module::ControlFlowNIM(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag) {
+    /*
+    1. Disarm or Reset command
+2. Enable “Sample Bank Swap Control with NIM Input T-I/U-I” Logic command.
+The Sample Bank Logic will be armed on Bank 1 with the next NIM input signal.
+The logic will toggle the active Bank with each following NIM input pulse.
+do {
+3a. Poll on Sample Logic Armed and Bank 2 flags and wait until Armed on
+Bank 2 is valid (acquisition control register: bit 16 = 1 and bit 17 = 1)
+4a. read “Previous Bank Sample address registers Ch1 to Ch16”
+(bit 24 gives means for checking whether the active
+bank was swapped already. It will be cleared if the address corresponds to
+Bank1 and will be set if the address corresponds to Bank2,)
+5a. read sampled data from Ch1 to Ch16 (Memory Bank 1)
+3b. Poll on Sample Logic Armed and Bank 2 flags and wait until Armed on
+Bank 1 is valid (acquisition control register: bit 16 = 1 and bit 17 = 0)
+4b. read “Previous Bank Sample address registers Ch1 to Ch16”
+(bit 24 gives means for checking whether the active
+bank was swapped already. It will be cleared if the address corresponds to
+Bank1 and will be set if the address corresponds to Bank2,)
+5b. read sampled data from Ch1 to Ch16 (Memory Bank 2)
+} (run == 1)
+6. Disarm command
+Respective to 4a/5a and 4b/5b refer to the routine below also:
+int sis3315_adc::read_MBLT64_Channel_PreviousBankDataBuffer(.)
+in ..\sis3315_class_library\sis3315_class.cpp
+Note:
+The user must care for proper timing between bank swapping (external NIM signal) and
+readout of the not active Bank.
+    */
+
     int event_count = 0;
-    std::vector<unsigned int> buffer(1024); //TODO: définir la taille du buffer en fonction du nombre de samples configuré par l'utilisateur dans les registres de configuration de chaque canal (0x1004 pour Ch1-4, etc.) et du nombre de canaux à lire. La taille doit être au moins nof_samples × (18 bits arrondis à 32 bits) = nof_samples mots 32-bit
-    //1. reset and disarm
+    static constexpr unsigned int CHANNEL_BUFFER_WORDS = 0x100000;
+    std::vector<unsigned int> buffer(CHANNEL_BUFFER_WORDS);
+
     resetModule();
     Disarm();
-   // 2. Set address threshold registers. Canaux à lire à chaque bnak : liste paramétrable. 1 mémoire par groupe de 4 canaux.
-   uint32_t threshold_registers[4] = {SIS3315_ADC_CH1_4_ADDRESS_THRESHOLD_REG, SIS3315_ADC_CH5_8_ADDRESS_THRESHOLD_REG, SIS3315_ADC_CH9_12_ADDRESS_THRESHOLD_REG, SIS3315_ADC_CH13_16_ADDRESS_THRESHOLD_REG};
-   //determine which groups are active or not
-  //1. vérifier quels canaux sont actifs
-  //lambda qui vérifie cela
-  auto isChannelActive = [&config](unsigned int channel) -> bool { // Le [&config] dans la capture donne à la lambda accès à config.channels par référence sans en faire une copie.
-    for (unsigned int ch : config.channels) {
-        if (ch == channel) return true;
-    }
-    return false;
-  };
-  
-  //2. pour les canaux actifs, on écrit la valeur de seuil voulue configurée dans la struct au registre End address threshold reg correspondant au groupe de canaux actif 
-  for (int group=0; group<4; group++) {
-    unsigned int threshold_value = isChannelActive(group*4) || isChannelActive(group*4+1) || isChannelActive(group*4+2) || isChannelActive(group*4+3) ? config.address_threshold : 0; // si au moins un canal du groupe est actif, on écrit la valeur de seuil configurée, sinon on écrit 0 pour éviter les triggers intempestifs
-    int rc = register_write(threshold_registers[group], threshold_value);
-    if (rc) throw std::runtime_error("Écriture du seuil d'adresse échouée pour le groupe " + std::to_string(group) + " (rc=" + std::to_string(rc) + ").");
-  }
 
-    //3. Disarm active Bank and arm Bank2 command donc on démarre avec bank2 active écriture et bank1 libre. on commence à remplir bank2
-    int rc= register_write(SIS3315_KEY_DISARM_AND_ARM_BANK2, 0);
-    if (rc) throw std::runtime_error("Disarm and Arm Bank2 échoué (rc=" + std::to_string(rc) + ").");
+    int rc = register_write(SIS3315_KEY_ENABLE_SAMPLE_BANK_SWAP_CONTROL_WITH_NIM_INPUT, 0);
+
+    if (rc) throw std::runtime_error("Enable Sample Bank Swap Control with NIM Input échoué (rc=" + std::to_string(rc) + ").");
+
+    unsigned int acq_control = 0;
+    register_read(SIS3315_ACQUISITION_CONTROL_STATUS, &acq_control);
+
+    if ((acq_control & (1 << ACQ_BIT_NIM_SWAP_ENABLED)) == 0)
+        throw std::runtime_error("Échec activation contrôle swap banque avec signal NIM (bit 22 = 0).");
+
+    while (*run_flag && (config.max_events == 0 || event_count < config.max_events)) {
+
+        // Cycle A : module actif sur bank2 -> lecture bank1
+
+        if (!Poll(config.poll_timeout_us))
+            throw std::runtime_error("Polling timeout while waiting for Bank 2 armed.");
+
+        for (unsigned int ch : config.channels) {
+            if (ch > 15)
+                throw std::invalid_argument("Numéro de canal invalide : " + std::to_string(ch));
+
+            unsigned int nbofwords = 0;
+            rc = read_MBLT64_Channel_PreviousBankDataBuffer(0, ch, &nbofwords, buffer.data());
+
+            if (rc)
+                throw std::runtime_error("Lecture canal " + std::to_string(ch) + " bank1 échouée (rc=" + std::to_string(rc) + ").");
+
+            if (user_callback && nbofwords > 0)
+                user_callback(1, ch, buffer.data(), nbofwords);
+        }
+
+        ++event_count;
+
+        if ((config.max_events > 0 && event_count >= config.max_events) || !*run_flag)
+            break;
+
+        // Cycle B : module actif sur bank1 -> lecture bank2
+
+        if (!Poll(config.poll_timeout_us))
+            throw std::runtime_error("Polling timeout while waiting for Bank 1 armed.");
+
+        for (unsigned int ch : config.channels) {
+            if (ch > 15)
+                throw std::invalid_argument("Numéro de canal invalide : " + std::to_string(ch));
+
+            unsigned int nbofwords = 0;
+            rc = read_MBLT64_Channel_PreviousBankDataBuffer(1, ch, &nbofwords, buffer.data());
+
+            if (rc)
+                throw std::runtime_error("Lecture canal " + std::to_string(ch) + " bank2 échouée (rc=" + std::to_string(rc) + ").");
+
+            if (user_callback && nbofwords > 0)
+                user_callback(2, ch, buffer.data(), nbofwords);
+        }
+
+        ++event_count;
+    }
+}
+void SIS3315Module::ControlFlowCycles(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag)
+{
+    int event_count = 0;
+
+    // TODO: définir la taille du buffer en fonction du nombre de samples configuré par l'utilisateur
+    // dans les registres de configuration de chaque canal (0x1004 pour Ch1-4, etc.)
+    // et du nombre de canaux à lire.
+    // Taille minimale = nof_samples × (18 bits arrondis à 32 bits)
+    std::vector<unsigned int> buffer(1024);
+
+    // 1. reset and disarm
+    resetModule();
+    Disarm();
+
+    // 2. Set address threshold registers.
+    // Canaux à lire à chaque bank : liste paramétrable.
+    // 1 mémoire par groupe de 4 canaux.
+    uint32_t threshold_registers[4] = {
+        SIS3315_ADC_CH1_4_ADDRESS_THRESHOLD_REG,
+        SIS3315_ADC_CH5_8_ADDRESS_THRESHOLD_REG,
+        SIS3315_ADC_CH9_12_ADDRESS_THRESHOLD_REG,
+        SIS3315_ADC_CH13_16_ADDRESS_THRESHOLD_REG
+    };
+
+    // déterminer quels groupes sont actifs ou non
+
+    // lambda qui vérifie si un canal est actif
+    auto isChannelActive = [&config](unsigned int channel) -> bool {
+        for (unsigned int ch : config.channels)
+            if (ch == channel)
+                return true;
+
+        return false;
+    };
+
+    // pour les canaux actifs, écrire la valeur de seuil configurée
+    // sinon écrire 0 pour éviter les triggers intempestifs
+    for (int group = 0; group < 4; group++) {
+
+        unsigned int threshold_value =
+            isChannelActive(group * 4) ||
+            isChannelActive(group * 4 + 1) ||
+            isChannelActive(group * 4 + 2) ||
+            isChannelActive(group * 4 + 3)
+            ? config.address_threshold
+            : 0;
+
+        int rc = register_write(threshold_registers[group], threshold_value);
+
+        if (rc)
+            throw std::runtime_error("Écriture du seuil d'adresse échouée pour le groupe " + std::to_string(group) + " (rc=" + std::to_string(rc) + ").");
+    }
+
+    // 3. Disarm active Bank and arm Bank2 command
+    // On démarre avec bank2 active en écriture et bank1 libre.
+    // On commence à remplir bank2.
+    int rc = register_write(SIS3315_KEY_DISARM_AND_ARM_BANK2, 0);
+
+    if (rc)
+        throw std::runtime_error("Disarm and Arm Bank2 échoué (rc=" + std::to_string(rc) + ").");
+
    
    //4. ici on atend le flag address threshold via poll avec tiemout. 
    /*
@@ -255,59 +390,81 @@ Bank to suppress a new start of capturing Hit/Events. The capturing of Hits/Even
 moment will be continued. The logic waits to arm the Bank1/2 (alternate) until “all channels
 are not busy”.
 */
-   //Main loop
-   while (*run_flag && (config.max_events == 0 || config.max_events > 0)) { //tant que le flag de contrôle est à true et que le nombre d'events max n'est pas atteint (si max_events=0, on tourne indéfiniment)
-   /************Demi cycle A: bank2 vient d se remplir, on lit bvank2 et module basscule sur bank1********** */
-   //4a
-   if (!Poll(config.poll_timeout_us)) { // si le polling returne false le timeout a été atteint sans flag détecté
-       throw std::runtime_error("Polling timeout reached without detecting address threshold flag.");
-   }
-   //5a
-   rc= register_write(SIS3315_KEY_DISARM_AND_ARM_BANK1, 0);
-   if (rc) throw std::runtime_error("Disarm and Arm Bank1 échoué (rc=" + std::to_string(rc) + ").");
-   //6a on vérifie que bank2 n'est plus actif ca se vérifie grace au bit 17 de 0x60 
-   if (checkBankSwap()) {
-       throw std::runtime_error("Bank swap check failed after arming Bank1: Bank2 is still active.");
-   }
+   // Main loop
+    // Tant que le flag de contrôle est à true et que le nombre max d'events n'est pas atteint
+    while (*run_flag && (config.max_events == 0 || event_count < config.max_events)) {
 
-   //7a lire bank2 donc on met le flag à 1
-   read_bank_channels(1, config.channels, buffer.data(), user_callback); //TODO: gérer le buffer et le callback utilisateur pour traiter les données lues
-    event_count++;
-   if (config.max_events > 0 && event_count >= config.max_events) {
-       std::cout << "[SIS3315] Nombre d'événements maximum atteint (" << event_count << "). Arrêt du contrôle de flux.\n";
-       break;
-   }
-   if (!*run_flag) {
-       std::cout << "[SIS3315] Run flag set to false. Arrêt du contrôle de flux.\n";
-       break;
-   }
-   /************Demi cycle B: bank1 vient d se remplir, on lit bank1 et module bascule sur bank2********** */
-    //4b 
-    if (!Poll(config.poll_timeout_us)) { // si le polling returne false le timeout a été atteint sans flag détecté
-       throw std::runtime_error("Polling timeout reached without detecting address threshold flag.");
+        /************ Demi-cycle A ************/
+        // bank2 vient de se remplir
+        // on lit bank2 et le module bascule sur bank1
+
+        // 4a : attente du flag address threshold via poll avec timeout
+        if (!Poll(config.poll_timeout_us))
+            throw std::runtime_error("Polling timeout reached without detecting address threshold flag.");
+
+        // 5a : disarm bank active + arm bank1
+        rc = register_write(SIS3315_KEY_DISARM_AND_ARM_BANK1, 0);
+
+        if (rc)
+            throw std::runtime_error("Disarm and Arm Bank1 échoué (rc=" + std::to_string(rc) + ").");
+
+        // 6a : vérifier que bank2 n'est plus active
+        // bit 17 du registre 0x60
+        if (checkBankSwap())
+            throw std::runtime_error("Bank swap check failed after arming Bank1: Bank2 is still active.");
+
+        // 7a : lecture de bank2 -> bank flag = 1
+        read_bank_channels(1, config.channels, buffer.data(), user_callback);
+
+        ++event_count;
+
+        if (config.max_events > 0 && event_count >= config.max_events) {
+            std::cout << "[SIS3315] Nombre d'événements maximum atteint (" << event_count << "). Arrêt du contrôle de flux.\n";
+            break;
+        }
+
+        if (!*run_flag) {
+            std::cout << "[SIS3315] Run flag set to false. Arrêt du contrôle de flux.\n";
+            break;
+        }
+
+        /************ Demi-cycle B ************/
+        // bank1 vient de se remplir
+        // on lit bank1 et le module bascule sur bank2
+
+        // 4b : attente du flag address threshold via poll avec timeout
+        if (!Poll(config.poll_timeout_us))
+            throw std::runtime_error("Polling timeout reached without detecting address threshold flag.");
+
+        // 5b : disarm bank active + arm bank2
+        rc = register_write(SIS3315_KEY_DISARM_AND_ARM_BANK2, 0);
+
+        if (rc)
+            throw std::runtime_error("Disarm and Arm Bank2 échoué (rc=" + std::to_string(rc) + ").");
+
+        // 6b : vérifier que bank1 n'est plus active
+        // bit 17 du registre 0x60
+        if (!checkBankSwap())
+            throw std::runtime_error("Bank swap check failed after arming Bank2: Bank1 is still active.");
+
+        // 7b : lecture de bank1 -> bank flag = 0
+        read_bank_channels(0, config.channels, buffer.data(), user_callback);
+
+        ++event_count;
+
+        if (config.max_events > 0 && event_count >= config.max_events) {
+            std::cout << "[SIS3315] Nombre d'événements maximum atteint (" << event_count << "). Arrêt du contrôle de flux.\n";
+            break;
+        }
+
+        if (!*run_flag) {
+            std::cout << "[SIS3315] Run flag set to false. Arrêt du contrôle de flux.\n";
+            break;
+        }
     }
-    //5b
-    rc= register_write(SIS3315_KEY_DISARM_AND_ARM_BANK2, 0);
-    if (rc) throw std::runtime_error("Disarm and Arm Bank2 échoué (rc=" + std::to_string(rc) + ").");
-    //6b on vérifie que bank1 n'est plus actif ca se vérifie grace au bit 17 de 0x60 
-    if (!checkBankSwap()) {
-       throw std::runtime_error("Bank swap check failed after arming Bank2: Bank1 is still active.");
-   }    
-    //7b lire bank1 donc on met le flag à 0
-    read_bank_channels(0, config.channels, buffer.data(), user_callback); //TODO: gérer le buffer et le callback utilisateur pour traiter les données lues
-    event_count++;
-   if (config.max_events > 0 && event_count >= config.max_events) {
-       std::cout << "[SIS3315] Nombre d'événements maximum atteint (" << event_count << "). Arrêt du contrôle de flux.\n";
-       break;
-   }
-   if (!*run_flag) {
-       std::cout << "[SIS3315] Run flag set to false. Arrêt du contrôle de flux.\n";
-       break;
-   }
-    }
-    //9. disarm à la fin du run
+
+    // 9. disarm à la fin du run
     Disarm();
-
 }
 
 
