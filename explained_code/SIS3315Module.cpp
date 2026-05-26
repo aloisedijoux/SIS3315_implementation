@@ -137,7 +137,7 @@ int SIS3315Module::Disarm() {
     if (rc) throw std::runtime_error("Key Disarm échoué (rc=" + std::to_string(rc) + ").");
 }
 //TODO: voir su on pa besoin de threads pour faire des pollings simultanés sur les 4 mémoires
-bool SIS3315Module::Poll(unsigned int timeout) { //config passée dans le control flow
+bool SIS3315Module::Poll(bool use_nim_mode, bool expect_bank2, unsigned int active_groups_mask, unsigned int timeout) { //config passée dans le control flow
     
 //on a un temps total durant lequel oninterroge, en principe il est inifini et cest le timeout
 
@@ -146,36 +146,52 @@ bool SIS3315Module::Poll(unsigned int timeout) { //config passée dans le contro
 // on a aussi le temps écoulé au fur et à mesure depuis le début polling
 unsigned int polling_frequency_us = 100;
 unsigned int elapsed_time_us = 0;
-while (elapsed_time_us < timeout) {
+while (timeout == 0 || elapsed_time_us < timeout) {
     unsigned int acq_control;
     int rc = register_read(SIS3315_ACQUISITION_CONTROL_STATUS, &acq_control);
     if (rc) throw std::runtime_error("Lecture Acquisition Control échouée (rc=" + std::to_string(rc) + ").");
-
-    if (acq_control & (1 << ACQ_BIT_ADDR_THRESH_OR)) {
-        std::cout << "[SIS3315] Address threshold flag detected! (acq_control=0x" << std::hex << acq_control << std::dec << ")\n";
-        return true; // seuil d'adresse atteint
-    }
-
-    if (timeout > 0 && elapsed_time_us >= timeout) {
-        std::cout << "[SIS3315] Polling timeout reached without detecting address threshold flag.\n";
-        return false; // timeout atteint sans détecter le seuil d'adresse
+    if (use_nim_mode) {
+        //mode nim : bit16=1 et 17=expected_bank2
+        bool armed = (acq_control & (1 << ACQ_BIT_SAMPLE_LOGIC_ARMED)) != 0;
+        bool bank2_active = (acq_control & (1 << ACQ_BIT_ARMED_ON_BANK2)) != 0;
+        if (armed && bank2_active == expect_bank2) {
+            std::cout << "[SIS3315] NIM acquisition event detected! (acq_control=0x" << std::hex << acq_control << std::dec << ")\n";
+            return true; // événement d'acquisition NIM détecté
+        } else {
+            //mode interface : tous les groups acrifs levent leur flag
+            if ((acq_control & active_groups_mask) == active_groups_mask) 
+            return true;
+        }
     }
     usleep(polling_frequency_us);
     elapsed_time_us += polling_frequency_us;
+}
+return false; // timeout atteint sans détecter l'événement d'acquisition
+   
 
 }
-}
-
-bool SIS3315Module::checkBankSwap() {
-    //bit 17:Status of ADC Sample Logic Armed On Bank2 flag donc quand le bit est à 1 bank2 est actif et quand il est à 0 bank1 est actif
-    unsigned int expected_bit = 1 << ACQ_BIT_ARMED_ON_BANK2;
-    unsigned int acq_control;
+bool SIS3315Module::checkBankSwap()
+{
+    // Lire le registre d'état
+    unsigned int acq_control = 0;
     int rc = register_read(SIS3315_ACQUISITION_CONTROL_STATUS, &acq_control);
-    if (rc) throw std::runtime_error("Lecture Acquisition Control échouée (rc=" + std::to_string(rc) + ").");
+    if (rc) throw std::runtime_error(
+        "Lecture Acquisition Control échouée (rc=" + std::to_string(rc) + ").");
 
-    return (acq_control & expected_bit) != 0; // retourne true si bank2 est actif, false si bank1 est actif
+    // Le bit 17 dit quel bank est actif :
+    //   1 : Bank2 active
+    //   0: Bank1 active
+
+    // Extraire la valeur du bit 17
+    // On décale le registre de 17 positions vers la droite
+    // puis on garde uniquement le dernier bit avec & 1
+    unsigned int bit17 = (acq_control >> ACQ_BIT_ARMED_ON_BANK2) & 1;
+
+    if (bit17 == 1)
+        return true;   // Bank2 est active
+    else
+        return false;  // Bank1 est active
 }
-
 void SIS3315Module::read_bank_channels(unsigned int bank2_flag, const std::vector<unsigned int>& channels, unsigned int* buffer, DataCallback cb) {
     // vérifier que le channel est valide
 
@@ -232,70 +248,47 @@ readout of the not active Bank.
     */
 
     int event_count = 0;
-    static constexpr unsigned int CHANNEL_BUFFER_WORDS = 0x100000;
-unsigned int buffer_size = (config.nof_samples % 2 == 0) ? config.nof_samples : config.nof_samples + 1; //  buffer overflow sinon pour avoir une paire
+    unsigned int buffer_size = (config.nof_samples % 2 == 0) ? config.nof_samples : config.nof_samples + 1; //  buffer overflow sinon pour avoir une paire
     std::vector<unsigned int> buffer(buffer_size);
+    //1. reset et ddisarm
     resetModule();
     Disarm();
-
+//2. enable nim
     int rc = register_write(SIS3315_KEY_ENABLE_SAMPLE_BANK_SWAP_CONTROL_WITH_NIM_INPUT, 0);
 
     if (rc) throw std::runtime_error("Enable Sample Bank Swap Control with NIM Input échoué (rc=" + std::to_string(rc) + ").");
+    // Vérification : bit 22 doit être à 1
 
     unsigned int acq_control = 0;
     register_read(SIS3315_ACQUISITION_CONTROL_STATUS, &acq_control);
 
     if ((acq_control & (1 << ACQ_BIT_NIM_SWAP_ENABLED)) == 0)
         throw std::runtime_error("Échec activation contrôle swap banque avec signal NIM (bit 22 = 0).");
-
+//loop
     while (*run_flag && (config.max_events == 0 || event_count < config.max_events)) {
 
         // Cycle A : module actif sur bank2 -> lecture bank1
-
-        if (!Poll(config.poll_timeout_us))
+//3a
+        if (!Poll(true, true, 0,config.poll_timeout_us)) //nim mode enable, bank2 doit ere actif, pas de mask de groupe actif car en mode nim on sait que les triggers sont sur tous les groupes
             throw std::runtime_error("Polling timeout while waiting for Bank 2 armed.");
-
-        for (unsigned int ch : config.channels) {
-            if (ch > 15)
-                throw std::invalid_argument("Numéro de canal invalide : " + std::to_string(ch));
-
-            unsigned int nbofwords = 0;
-            rc = read_MBLT64_Channel_PreviousBankDataBuffer(0, ch, &nbofwords, buffer.data());
-
-            if (rc)
-                throw std::runtime_error("Lecture canal " + std::to_string(ch) + " bank1 échouée (rc=" + std::to_string(rc) + ").");
-
-            if (user_callback && nbofwords > 0)
-                user_callback(1, ch, buffer.data(), nbofwords);
-        }
-
-        ++event_count;
-
-        if ((config.max_events > 0 && event_count >= config.max_events) || !*run_flag)
-            break;
+//4a et 5a
+read_bank_channels(0, config.channels, buffer.data(), user_callback); //bank2flag=0 pour lire la banque non active, càd bank1
+++event_count;
+if ((config.max_events > 0 && event_count >= config.max_events) || !*run_flag)
+    break;
 
         // Cycle B : module actif sur bank1 -> lecture bank2
-
-        if (!Poll(config.poll_timeout_us))
+            //3b poll Armed on Bank2 (bit16=1, bit17=1)
+        if (!Poll(true, false, 0, config.poll_timeout_us)) //nim mode enable, bank1 doit être actif, pas de mask de groupe actif car en mode nim on sait que les triggers sont sur tous les groupes
             throw std::runtime_error("Polling timeout while waiting for Bank 1 armed.");
-
-        for (unsigned int ch : config.channels) {
-            if (ch > 15)
-                throw std::invalid_argument("Numéro de canal invalide : " + std::to_string(ch));
-
-            unsigned int nbofwords = 0;
-            rc = read_MBLT64_Channel_PreviousBankDataBuffer(1, ch, &nbofwords, buffer.data());
-
-            if (rc)
-                throw std::runtime_error("Lecture canal " + std::to_string(ch) + " bank2 échouée (rc=" + std::to_string(rc) + ").");
-
-            if (user_callback && nbofwords > 0)
-                user_callback(2, ch, buffer.data(), nbofwords);
-        }
-
-        ++event_count;
-    }
+//4b et 5b
+read_bank_channels(1, config.channels, buffer.data(), user_callback); //bank2flag=1 pour lire la banque non active, càd bank2
+++event_count;}
+//6. disarm
+Disarm();
 }
+
+
 void SIS3315Module::ControlFlowCycles(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag)
 {
     int event_count = 0;
@@ -320,6 +313,14 @@ unsigned int buffer_size = (config.nof_samples % 2 == 0) ? config.nof_samples : 
         SIS3315_ADC_CH13_16_ADDRESS_THRESHOLD_REG
     };
 
+    // Bits Address Threshold par groupe dans le registre 0x60
+    const unsigned int thresh_bits[4] = {
+        (1 << ACQ_BIT_ADDR_THRESH_CH1_4),   
+        (1 << ACQ_BIT_ADDR_THRESH_CH5_8),    
+        (1 << ACQ_BIT_ADDR_THRESH_CH9_12),   
+        (1 << ACQ_BIT_ADDR_THRESH_CH13_16)  
+    };
+
     // déterminer quels groupes sont actifs ou non
 
     // lambda qui vérifie si un canal est actif
@@ -327,26 +328,29 @@ unsigned int buffer_size = (config.nof_samples % 2 == 0) ? config.nof_samples : 
         for (unsigned int ch : config.channels)
             if (ch == channel)
                 return true;
-
         return false;
     };
 
     // pour les canaux actifs, écrire la valeur de seuil configurée
     // sinon écrire 0 pour éviter les triggers intempestifs
+     unsigned int active_groups_mask = 0;
+
     for (int group = 0; group < 4; group++) {
 
-        unsigned int threshold_value =
-            isChannelActive(group * 4) ||
-            isChannelActive(group * 4 + 1) ||
-            isChannelActive(group * 4 + 2) ||
-            isChannelActive(group * 4 + 3)
-            ? config.address_threshold
-            : 0;
+        bool active = isChannelActive(group * 4)     || // Pour le groupe 0 : est-ce que le canal 0, 1, 2 ou 3 est dans la liste ?
+                      isChannelActive(group * 4 + 1) || // Pour le groupe 1 : est-ce que le canal 4, 5, 6 ou 7 est dans la liste ?
+                      isChannelActive(group * 4 + 2) ||
+                      isChannelActive(group * 4 + 3);
+
+        unsigned int threshold_value = active ? config.address_threshold : 0; // si le groupe est actif, on met le seuil configuré, sinon 0 pour éviter les triggers sur ce groupe
 
         int rc = register_write(threshold_registers[group], threshold_value);
+        if (rc) throw std::runtime_error(
+            "Écriture seuil groupe " + std::to_string(group) +
+            " échouée (rc=" + std::to_string(rc) + ").");
 
-        if (rc)
-            throw std::runtime_error("Écriture du seuil d'adresse échouée pour le groupe " + std::to_string(group) + " (rc=" + std::to_string(rc) + ").");
+        if (active) // Si le groupe est actif, on ajoute son bit au masque
+            active_groups_mask |= thresh_bits[group];
     }
 
     // 3. Disarm active Bank and arm Bank2 command
@@ -399,7 +403,7 @@ are not busy”.
         // on lit bank2 et le module bascule sur bank1
 
         // 4a : attente du flag address threshold via poll avec timeout
-        if (!Poll(config.poll_timeout_us))
+        if (!Poll(false, false, active_groups_mask, config.poll_timeout_us))
             throw std::runtime_error("Polling timeout reached without detecting address threshold flag.");
 
         // 5a : disarm bank active + arm bank1
@@ -417,11 +421,9 @@ are not busy”.
         read_bank_channels(1, config.channels, buffer.data(), user_callback);
 
         ++event_count;
-
-        if (config.max_events > 0 && event_count >= config.max_events) {
-            std::cout << "[SIS3315] Nombre d'événements maximum atteint (" << event_count << "). Arrêt du contrôle de flux.\n";
+if ((config.max_events > 0 && event_count >= config.max_events) || !*run_flag)
             break;
-        }
+
 
         if (!*run_flag) {
             std::cout << "[SIS3315] Run flag set to false. Arrêt du contrôle de flux.\n";
@@ -433,7 +435,7 @@ are not busy”.
         // on lit bank1 et le module bascule sur bank2
 
         // 4b : attente du flag address threshold via poll avec timeout
-        if (!Poll(config.poll_timeout_us))
+        if (!Poll(false, false, active_groups_mask, config.poll_timeout_us))
             throw std::runtime_error("Polling timeout reached without detecting address threshold flag.");
 
         // 5b : disarm bank active + arm bank2
@@ -472,11 +474,17 @@ are not busy”.
 void SIS3315Module::ControlFlow(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag, bool use_nim_mode) {
     
  
-    if (use_nim_mode) {
+    if (config.channels.empty())
+        throw std::invalid_argument("La liste de canaux ne peut pas être vide.");
+    if (config.nof_samples == 0)
+        throw std::invalid_argument("nof_samples doit être > 0.");
+    if (run_flag == nullptr)
+        throw std::invalid_argument("run_flag ne peut pas être nullptr.");
+
+    if (use_nim_mode)
         ControlFlowNIM(config, user_callback, run_flag);
-    } else {
+    else
         ControlFlowCycles(config, user_callback, run_flag);
-    }
 }
 
 /*

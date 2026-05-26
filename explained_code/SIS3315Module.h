@@ -293,7 +293,7 @@ L'utilisateur fixe nof_samples dans le registre de configuration du canal (regis
 La taille du buffer doit donc être au moins :
 buffer_size = nof_samples × (18 bits arrondis à 32 bits) = nof_samples mots 32-bit
 */
-using DataCallback = std::function<void(unsigned int bank, unsigned int channel, unsigned int* data, unsigned int nbofwords)>;
+using DataCallback = std::function<void(unsigned int bank, unsigned int channel_no, const unsigned int* data, unsigned int nbofwords)>;
 
 template<typename T> bool inRange(T value, T min, T max) {
     return value >= min && value <= max;
@@ -332,7 +332,7 @@ public:
       void ControlFlowNIM(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag);
     void ControlFlow(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag, bool use_nim_mode);
 
-   bool Poll(unsigned int timeout);
+   bool Poll(bool use_nim_mode, bool expect_bank2, unsigned int active_groups_mask, unsigned int timeout);
    bool checkBankSwap();
    void read_bank_channels(unsigned int bank2_flag,
                                       const std::vector<unsigned int>& channels,
