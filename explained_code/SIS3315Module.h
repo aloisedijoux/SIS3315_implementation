@@ -282,6 +282,10 @@ ADC-inputs.
     },
     
 };
+enum class AcquisitionMode {
+    INTERFACE,  // bank swap déclenché par software (address threshold)
+    NIM         // bank swap déclenché par signal NIM TI/UI
+};
 
 /*
 
@@ -300,11 +304,14 @@ enum class AcquisitionMode {
 };
 
 struct AcquisitionConfig {
+    AcquisitionMode mode;
     std::vector<unsigned int> channels;    // liste des canaux à lire (0–15)
     unsigned int address_threshold;        // seuil de remplissage mémoire
                                            // (même valeur pour tous les groupes)
     unsigned int poll_timeout_us;          // timeout du poll address threshold (µs)
     unsigned int max_events;               // 0 = infini
+    unsigned int nof_samples;             // nombre de samples à lire par déclenchement
+    
 };
 
 // construceur de ADCModule de la forme : ADCModule()
@@ -323,6 +330,7 @@ public:
    int Disarm();
    void ControlFlowCycles(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag);
       void ControlFlowNIM(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag);
+    void ControlFlow(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag, bool use_nim_mode);
 
    bool Poll(unsigned int timeout);
    bool checkBankSwap();

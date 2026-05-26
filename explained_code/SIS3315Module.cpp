@@ -233,8 +233,8 @@ readout of the not active Bank.
 
     int event_count = 0;
     static constexpr unsigned int CHANNEL_BUFFER_WORDS = 0x100000;
-    std::vector<unsigned int> buffer(CHANNEL_BUFFER_WORDS);
-
+unsigned int buffer_size = (config.nof_samples % 2 == 0) ? config.nof_samples : config.nof_samples + 1; //  buffer overflow sinon pour avoir une paire
+    std::vector<unsigned int> buffer(buffer_size);
     resetModule();
     Disarm();
 
@@ -304,8 +304,8 @@ void SIS3315Module::ControlFlowCycles(const AcquisitionConfig& config, DataCallb
     // dans les registres de configuration de chaque canal (0x1004 pour Ch1-4, etc.)
     // et du nombre de canaux à lire.
     // Taille minimale = nof_samples × (18 bits arrondis à 32 bits)
-    std::vector<unsigned int> buffer(1024);
-
+unsigned int buffer_size = (config.nof_samples % 2 == 0) ? config.nof_samples : config.nof_samples + 1; //  buffer overflow sinon pour avoir une paire
+    std::vector<unsigned int> buffer(buffer_size);
     // 1. reset and disarm
     resetModule();
     Disarm();
@@ -468,6 +468,16 @@ are not busy”.
 }
 
 
+//deux modes combinés
+void SIS3315Module::ControlFlow(const AcquisitionConfig& config, DataCallback user_callback, volatile bool* run_flag, bool use_nim_mode) {
+    
+ 
+    if (use_nim_mode) {
+        ControlFlowNIM(config, user_callback, run_flag);
+    } else {
+        ControlFlowCycles(config, user_callback, run_flag);
+    }
+}
 
 /*
 Fonctionnement de l'horgloge : 
